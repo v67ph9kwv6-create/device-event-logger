@@ -7,5 +7,6 @@ Deno.serve((req) =>
     API_KEY: Deno.env.get("API_KEY") ?? "",
     DATABASE_URL: Deno.env.get("DATABASE_URL") ?? "",
     TZ_OFFSET: Deno.env.get("TZ_OFFSET"),
+    AMAP_MAPS_API_KEY: Deno.env.get("AMAP_MAPS_API_KEY"),
   })
 );
