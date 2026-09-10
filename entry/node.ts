@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "../src/app.ts";
 const app = createApp();
+console.log("AMAP key loaded:", !!process.env.AMAP_MAPS_API_KEY, "length:", process.env.AMAP_MAPS_API_KEY?.length);
 const env = {
   API_KEY: process.env.API_KEY ?? "",
   DATABASE_URL: process.env.DATABASE_URL ?? "",
