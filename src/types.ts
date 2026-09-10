@@ -4,6 +4,7 @@ export type Env = {
   API_KEY: string;
   DATABASE_URL: string;
   TZ_OFFSET?: string;
+  AMAP_MAPS_API_KEY?: string;
 };
 
 export type Vars = {
