@@ -12,6 +12,35 @@ import {
 } from "./queries.ts";
 import { withRetry } from "./db.ts";
 
+const AMAP_BASE_URL = "https://restapi.amap.com";
+
+async function amapRequest(
+  path: string,
+  params: Record<string, string>,
+  apiKey: string,
+): Promise<unknown> {
+  const url = new URL(path, AMAP_BASE_URL);
+  url.searchParams.set("key", apiKey);
+
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(`高德 API 请求失败: HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  if (data.status !== "1") {
+    throw new Error(`高德 API 请求失败: ${data.info || "未知错误"}`);
+  }
+
+  return data;
+}
+
 const DEFAULT_MCP_PROTOCOL_VERSION = "2025-03-26";
 // 新版本排在最前，客户端报了不认识的版本时用它回落
 const SUPPORTED_MCP_PROTOCOL_VERSION_LIST = [
@@ -195,6 +224,30 @@ const DELETE_EVENTS_TOOL = {
   },
 };
 
+
+const AMAP_WEATHER_TOOL = {
+  name: "amap_weather",
+  title: "高德天气",
+  description:
+    "查询指定城市的当前天气和天气预报。city 可以填写城市名，例如北京、上海、东京。",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      city: {
+        type: "string",
+        description: "城市名称，例如北京、上海、东京。",
+      },
+      extensions: {
+        type: "string",
+        enum: ["base", "all"],
+        description:
+          "base 查询当前天气，all 查询天气预报。默认使用 base。",
+      },
+    },
+    required: ["city"],
+  },
+};
 function jsonRpcError(id: JsonRpcId, code: number, message: string, data?: unknown) {
   return {
     jsonrpc: "2.0" as const,
@@ -232,6 +285,59 @@ function containsInitialize(body: unknown): boolean {
     !!item && typeof item === "object" &&
     (item as JsonRpcMessage).method === "initialize";
   return Array.isArray(body) ? body.some(isInitialize) : isInitialize(body);
+}
+
+async function callAmapWeatherTool(
+  args: Record<string, unknown>,
+  apiKey?: string,
+) {
+  const city = typeof args.city === "string" ? args.city.trim() : "";
+  const extensions = args.extensions === "all" ? "all" : "base";
+
+  if (!city) {
+    return {
+      content: [{ type: "text", text: "请提供城市名称，例如北京或上海。" }],
+      isError: true,
+    };
+  }
+
+  if (!apiKey) {
+    return {
+      content: [{ type: "text", text: "高德地图 API Key 未配置。" }],
+      isError: true,
+    };
+  }
+
+  try {
+    const data = await amapRequest(
+      "/v3/weather/weatherInfo",
+      {
+        city,
+        extensions,
+        output: "JSON",
+      },
+      apiKey,
+    );
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(data, null, 2),
+        },
+      ],
+      isError: false,
+    };
+  } catch (error) {
+    console.error("MCP amap_weather failed:", error);
+    return {
+      content: [{
+        type: "text",
+        text: error instanceof Error ? error.message : "高德天气查询失败。",
+      }],
+      isError: true,
+    };
+  }
 }
 
 async function callQueryEventsTool(args: Record<string, unknown>, sql: postgres.Sql, offsetMinutes: number) {
@@ -324,7 +430,12 @@ async function callDeleteEventsTool(
   }
 }
 
-async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offsetMinutes: number) {
+async function handleMcpRequest(
+  message: JsonRpcMessage,
+  sql: postgres.Sql,
+  offsetMinutes: number,
+  amapApiKey?: string,
+) {
   const id = (message.id ?? null) as JsonRpcId;
   const method = typeof message.method === "string" ? message.method : "";
   const params = (message.params && typeof message.params === "object")
@@ -355,14 +466,24 @@ async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offs
     case "ping":
       return jsonRpcResult(id, {});
     case "tools/list":
-      return jsonRpcResult(id, {
-        tools: [QUERY_EVENTS_TOOL, LIST_EVENT_TYPES_TOOL, DELETE_EVENTS_TOOL],
-      });
+      return jsonRpcResult(id, {tools: [
+  QUERY_EVENTS_TOOL,
+  LIST_EVENT_TYPES_TOOL,
+  DELETE_EVENTS_TOOL,
+  AMAP_WEATHER_TOOL,
+],
+   });                             
     case "tools/call": {
       const name = typeof params.name === "string" ? params.name : "";
       const args = (params.arguments && typeof params.arguments === "object")
         ? params.arguments as Record<string, unknown>
         : {};
+    if (name === AMAP_WEATHER_TOOL.name) {
+        return jsonRpcResult(
+          id,
+          await callAmapWeatherTool(args, amapApiKey),
+        );
+    }
       if (name === LIST_EVENT_TYPES_TOOL.name) {
         return jsonRpcResult(id, await callListEventTypesTool(args, sql));
       }
@@ -417,7 +538,14 @@ export async function handleMcpPost(c: Context<{ Bindings: Env; Variables: Vars 
         responses.push(jsonRpcError(null, -32600, "Invalid Request"));
         continue;
       }
-      responses.push(await handleMcpRequest(message, sql, offsetMinutes));
+      responses.push(
+  await handleMcpRequest(
+    message,
+    sql,
+    offsetMinutes,
+    c.env.AMAP_MAPS_API_KEY,
+  ),
+);
     }
     if (!responses.length) {
       return c.body(null, 202);
@@ -439,7 +567,12 @@ export async function handleMcpPost(c: Context<{ Bindings: Env; Variables: Vars 
     c.header("MCP-Protocol-Version", protocolVersion);
     return c.json(jsonRpcError(null, -32600, "Invalid Request"), 400);
   }
-  const response = await handleMcpRequest(message, sql, offsetMinutes);
+  const response = await handleMcpRequest(
+  message,
+  sql,
+  offsetMinutes,
+  c.env.AMAP_MAPS_API_KEY,
+);
   if (response == null) {
     return c.body(null, 202);
   }
